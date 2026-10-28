@@ -1,4 +1,3 @@
-
 #include <math.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
