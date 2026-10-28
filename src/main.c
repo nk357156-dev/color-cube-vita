@@ -12,9 +12,9 @@
 #define MQTT_PORT          1883
 #define MAX_PACKET         2048
 #define MAX_CLIENTS        4
-#define MAX_SUBS            16
+#define MAX_SUBS           16
 #define MAX_SUBSCRIPTIONS  (MAX_CLIENTS * MAX_SUBS)
-#define MAX_TOPIC           128
+#define MAX_TOPIC          128
 #define NET_MEMORY_SIZE    (1024 * 1024)
 
 static SceUID log_mutex = -1;
@@ -99,7 +99,6 @@ static int send_exact(int client, const void *buffer, int length)
 
 /* --------------------------------------------------------- */
 /* MQTT packet reader                                         */
-/* Returns body length; header is written to *header.         */
 /* --------------------------------------------------------- */
 
 static int read_packet(
@@ -137,10 +136,9 @@ static int read_packet(
         return -1;
     }
 
-    if (remaining > 0) {
-        if (recv_exact(client, body, remaining) < 0) {
-            return -1;
-        }
+    if (remaining > 0 &&
+        recv_exact(client, body, remaining) < 0) {
+        return -1;
     }
 
     return remaining;
@@ -209,9 +207,15 @@ static int handle_connect(
 {
     int pos = 0;
     unsigned int protocol_length;
+    unsigned int client_id_length;
     unsigned char connect_flags;
-    unsigned char connack[4] = {
+
+    const unsigned char connack_ok[4] = {
         0x20, 0x02, 0x00, 0x00
+    };
+
+    const unsigned char connack_version_error[4] = {
+        0x20, 0x02, 0x00, 0x01
     };
 
     if (length < 10) {
@@ -221,10 +225,11 @@ static int handle_connect(
     protocol_length =
         ((unsigned int)body[pos] << 8) |
         body[pos + 1];
+
     pos += 2;
 
     if (protocol_length != 4 ||
-        pos + 4 + 1 + 1 + 2 > (unsigned int)length) {
+        pos + 4 + 1 + 1 + 2 > length) {
         return -1;
     }
 
@@ -234,51 +239,59 @@ static int handle_connect(
 
     pos += 4;
 
-    /* This prototype supports MQTT 3.1.1 only. */
     if (body[pos++] != 4) {
-        connack[3] = 0x01;
-        send_exact(client, connack, sizeof(connack));
+        send_exact(
+            client,
+            connack_version_error,
+            sizeof(connack_version_error)
+        );
         return -1;
     }
 
     connect_flags = body[pos++];
 
-    /* Reject reserved bit and unsupported username/password. */
-    if ((connect_flags & 0x01) != 0 ||
-        (connect_flags & 0xC0) != 0) {
+    /* Reserved flag must be zero. */
+    if ((connect_flags & 0x01) != 0) {
         return -1;
     }
 
-    /* Skip keep-alive. */
+    /* Username/password authentication is unsupported. */
+    if ((connect_flags & 0xC0) != 0) {
+        return -1;
+    }
+
+    /* Skip Keep Alive. */
     pos += 2;
 
     if (pos + 2 > length) {
         return -1;
     }
 
-    /* Validate that a client ID field is present. */
-    {
-        unsigned int id_length =
-            ((unsigned int)body[pos] << 8) |
-            body[pos + 1];
+    client_id_length =
+        ((unsigned int)body[pos] << 8) |
+        body[pos + 1];
 
-        pos += 2;
+    pos += 2;
 
-        if (pos + (int)id_length > length) {
-            return -1;
-        }
+    if (pos + (int)client_id_length > length) {
+        return -1;
     }
 
-    if (send_exact(client, connack, sizeof(connack)) < 0) {
+    if (send_exact(
+            client,
+            connack_ok,
+            sizeof(connack_ok)
+        ) < 0) {
         return -1;
     }
 
     log_msg("MQTT: CONNECT accepted");
+
     return 0;
 }
 
 /* --------------------------------------------------------- */
-/* Forward QoS 0 PUBLISH to clients subscribed to exact topic */
+/* Forward QoS 0 PUBLISH to exact-topic subscribers            */
 /* --------------------------------------------------------- */
 
 static void forward_publish(
@@ -299,19 +312,14 @@ static void forward_publish(
             strcmp(subscriptions[i].topic, topic) == 0) {
 
             /*
-             * Send the complete original MQTT packet.
-             * This prototype forwards QoS 0 only.
+             * Forward the original MQTT packet.
+             * Only QoS 0 is supported.
              */
-            if (send_exact(
-                    subscriptions[i].client,
-                    packet,
-                    packet_length
-                ) < 0) {
-                /*
-                 * The client thread will remove stale
-                 * subscriptions when it detects disconnect.
-                 */
-            }
+            send_exact(
+                subscriptions[i].client,
+                packet,
+                packet_length
+            );
         }
     }
 
@@ -333,11 +341,13 @@ static int handle_publish(
     char topic[MAX_TOPIC];
     unsigned char packet[MAX_PACKET];
     int packet_length;
+    int pos;
+    int remaining;
     int qos;
 
     qos = (header >> 1) & 0x03;
 
-    /* Only QoS 0 and non-retained messages are supported. */
+    /* QoS 0 only; retained messages are unsupported. */
     if (qos != 0 || (header & 0x01) != 0) {
         return -1;
     }
@@ -359,36 +369,32 @@ static int handle_publish(
     memcpy(topic, body + 2, topic_length);
     topic[topic_length] = '\0';
 
-    /*
-     * Reconstruct the complete MQTT packet so that it can
-     * be forwarded to subscribers.
-     */
+    /* Reconstruct the MQTT packet for forwarding. */
     packet[0] = header;
 
-    {
-        int remaining = length;
-        int pos = 1;
+    remaining = length;
+    pos = 1;
 
-        do {
-            unsigned char digit =
-                (unsigned char)(remaining % 128);
+    do {
+        unsigned char digit =
+            (unsigned char)(remaining % 128);
 
-            remaining /= 128;
+        remaining /= 128;
 
-            if (remaining > 0) {
-                digit |= 0x80;
-            }
-
-            packet[pos++] = digit;
-        } while (remaining > 0);
-
-        if (pos + length > MAX_PACKET) {
-            return -1;
+        if (remaining > 0) {
+            digit |= 0x80;
         }
 
-        memcpy(packet + pos, body, length);
-        packet_length = pos + length;
+        packet[pos++] = digit;
+
+    } while (remaining > 0);
+
+    if (pos + length > MAX_PACKET) {
+        return -1;
     }
+
+    memcpy(packet + pos, body, length);
+    packet_length = pos + length;
 
     forward_publish(
         client,
@@ -411,7 +417,7 @@ static int handle_subscribe(
     int length
 )
 {
-    unsigned char response[2 + MAX_SUBS];
+    unsigned char response[4 + MAX_SUBS];
     unsigned int packet_id;
     int pos = 2;
     int count = 0;
@@ -426,7 +432,6 @@ static int handle_subscribe(
         body[1];
 
     response[0] = 0x90;
-    response[1] = 0;
 
     while (pos + 3 <= length && count < MAX_SUBS) {
         unsigned int topic_length;
@@ -463,7 +468,7 @@ static int handle_subscribe(
 
         sceKernelLockMutex(sub_mutex, 1, NULL);
 
-        /* Reuse an existing subscription for this client. */
+        /* Reuse existing subscription if present. */
         for (i = 0; i < MAX_SUBSCRIPTIONS; i++) {
             if (subscriptions[i].client == client &&
                 strcmp(subscriptions[i].topic, topic) == 0) {
@@ -472,7 +477,7 @@ static int handle_subscribe(
             }
         }
 
-        /* Otherwise find an empty slot. */
+        /* Find an empty slot otherwise. */
         if (slot < 0) {
             for (i = 0; i < MAX_SUBSCRIPTIONS; i++) {
                 if (subscriptions[i].client == 0) {
@@ -484,17 +489,21 @@ static int handle_subscribe(
 
         if (slot >= 0) {
             subscriptions[slot].client = client;
+
             strncpy(
                 subscriptions[slot].topic,
                 topic,
                 MAX_TOPIC - 1
             );
+
             subscriptions[slot].topic[MAX_TOPIC - 1] = '\0';
         }
 
         sceKernelUnlockMutex(sub_mutex, 1);
 
-        response[response_pos++] = slot >= 0 ? 0x00 : 0x80;
+        response[response_pos++] =
+            (slot >= 0) ? 0x00 : 0x80;
+
         count++;
     }
 
@@ -502,20 +511,21 @@ static int handle_subscribe(
         return -1;
     }
 
+    response[1] = (unsigned char)(2 + count);
     response[2] = (unsigned char)((packet_id >> 8) & 0xFF);
     response[3] = (unsigned char)(packet_id & 0xFF);
-    response[1] = (unsigned char)(2 + count);
 
     if (send_exact(client, response, response_pos) < 0) {
         return -1;
     }
 
     log_msg("MQTT: SUBSCRIBE handled");
+
     return 0;
 }
 
 /* --------------------------------------------------------- */
-/* Client thread                                              */
+/* Handle connected client                                    */
 /* --------------------------------------------------------- */
 
 static int handle_client(int client)
@@ -539,11 +549,8 @@ static int handle_client(int client)
 
         switch ((header >> 4) & 0x0F) {
             case 1: /* CONNECT */
-                if (connected || handle_connect(
-                        client,
-                        body,
-                        length
-                    ) < 0) {
+                if (connected ||
+                    handle_connect(client, body, length) < 0) {
                     goto done;
                 }
 
@@ -580,7 +587,8 @@ static int handle_client(int client)
                     0xD0, 0x00
                 };
 
-                if (!connected || length != 0 ||
+                if (!connected ||
+                    length != 0 ||
                     send_exact(
                         client,
                         pingresp,
@@ -588,6 +596,7 @@ static int handle_client(int client)
                     ) < 0) {
                     goto done;
                 }
+
                 break;
             }
 
@@ -595,7 +604,6 @@ static int handle_client(int client)
                 goto done;
 
             default:
-                /* Unsupported MQTT packet type. */
                 goto done;
         }
     }
@@ -604,8 +612,13 @@ done:
     release_client(client);
     sceNetSocketClose(client);
     log_msg("MQTT: client disconnected");
+
     return 0;
 }
+
+/* --------------------------------------------------------- */
+/* Client thread                                              */
+/* --------------------------------------------------------- */
 
 static int client_thread(SceSize args, void *argp)
 {
@@ -619,14 +632,15 @@ static int client_thread(SceSize args, void *argp)
     }
 
     /*
-     * sceKernelStartThread copies the argument bytes into
-     * the new thread's argument area. Do not free argp.
+     * The kernel copies the thread arguments.
+     * Do not free argp.
      */
     client = *(const int *)argp;
 
     handle_client(client);
 
     sceKernelExitDeleteThread(0);
+
     return 0;
 }
 
@@ -642,7 +656,8 @@ int main(void)
     int i;
     SceNetSockaddrIn address;
 
-    debugScreenInit();
+    /* Correct debug screen initialization function. */
+    psvDebugScreenInit();
 
     printf("Vita MQTT Broker\n");
     printf("Starting...\n");
@@ -683,6 +698,7 @@ int main(void)
     }
 
     memset(&net_init, 0, sizeof(net_init));
+
     net_init.memory = net_memory;
     net_init.size = NET_MEMORY_SIZE;
     net_init.flags = 0;
@@ -712,10 +728,12 @@ int main(void)
     }
 
     memset(&address, 0, sizeof(address));
+
     address.sin_len = sizeof(address);
     address.sin_family = SCE_NET_AF_INET;
     address.sin_port = sceNetHtons(MQTT_PORT);
-    address.sin_addr.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
+    address.sin_addr.s_addr =
+        sceNetHtonl(SCE_NET_INADDR_ANY);
 
     if (sceNetBind(
             server,
@@ -779,8 +797,8 @@ int main(void)
         }
 
         /*
-         * Pass the integer value by copying its bytes.
-         * No heap allocation and no free() in client_thread.
+         * Pass the socket descriptor by value.
+         * No malloc/free is required for thread arguments.
          */
         if (sceKernelStartThread(
                 tid,
