@@ -20,10 +20,12 @@ add_executable(ColorCube
 
 target_link_libraries(ColorCube
     vita2d
+    SceAppMgr_stub
     SceCtrl_stub
     SceDisplay_stub
     SceGxm_stub
     SceSysmodule_stub
+    SceCommonDialog_stub
     m
 )
 
