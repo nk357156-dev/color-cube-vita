@@ -6,34 +6,31 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         CACHE PATH "VitaSDK toolchain")
 endif()
 
-project(ColorCube C)
+project(VitaMQTT C)
 
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
-set(VITA_APP_NAME "Color Cube")
+set(VITA_APP_NAME "Vita MQTT Broker")
 set(VITA_TITLEID "NKVITAC01")
 set(VITA_VERSION "01.00")
 
-add_executable(ColorCube
+add_executable(VitaMQTT
     src/main.c
 )
 
-target_link_libraries(ColorCube
-    vita2d
+target_link_libraries(VitaMQTT
+    SceNet_stub
+    SceNetCtl_stub
     SceAppMgr_stub
-    SceCtrl_stub
-    SceDisplay_stub
-    SceGxm_stub
     SceSysmodule_stub
-    SceCommonDialog_stub
     m
 )
 
-vita_create_self(eboot.bin ColorCube)
+vita_create_self(eboot.bin VitaMQTT)
 
-vita_create_vpk(ColorCube.vpk
+vita_create_vpk(VitaMQTT.vpk
     NKVITAC01
     eboot.bin
     VERSION 01.00
-    NAME "Color Cube"
+    NAME "Vita MQTT Broker"
 )
