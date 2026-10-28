@@ -11,7 +11,7 @@ int main(void)
         return 1;
     }
 
-    vita2d_set_clear_color(RGBA8(20, 30, 50, 255));
+    vita2d_set_clear_color(RGBA8(30, 30, 40, 255));
 
     SceCtrlData pad;
 
@@ -23,6 +23,22 @@ int main(void)
 
         vita2d_start_drawing();
         vita2d_clear_screen();
+
+        vita2d_draw_rectangle(
+            100, 100, 200, 200,
+            RGBA8(255, 0, 0, 255)
+        );
+
+        vita2d_draw_rectangle(
+            380, 100, 200, 200,
+            RGBA8(0, 255, 0, 255)
+        );
+
+        vita2d_draw_rectangle(
+            660, 100, 200, 200,
+            RGBA8(0, 100, 255, 255)
+        );
+
         vita2d_end_drawing();
         vita2d_swap_buffers();
     }
