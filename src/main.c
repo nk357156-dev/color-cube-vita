@@ -12,6 +12,7 @@
 #define MQTT_PORT 1883
 #define BACKLOG 4
 #define MAX_PACKET 2048
+#define MAX_TEXT 512
 
 static unsigned char net_pool[256 * 1024];
 static unsigned char packet[MAX_PACKET];
@@ -26,8 +27,9 @@ static int recv_exact(int sock, unsigned char *buf, int len)
     int total = 0;
 
     while (total < len) {
-        int n = sceNetRecv(sock, buf + total,
-                           (unsigned int)(len - total), 0);
+        int n = sceNetRecv(
+            sock, buf + total, (unsigned int)(len - total), 0
+        );
 
         if (n <= 0)
             return -1;
@@ -43,8 +45,9 @@ static int send_exact(int sock, const unsigned char *buf, int len)
     int total = 0;
 
     while (total < len) {
-        int n = sceNetSend(sock, buf + total,
-                           (unsigned int)(len - total), 0);
+        int n = sceNetSend(
+            sock, buf + total, (unsigned int)(len - total), 0
+        );
 
         if (n <= 0)
             return -1;
@@ -55,47 +58,158 @@ static int send_exact(int sock, const unsigned char *buf, int len)
     return total;
 }
 
-static void handle_client(int client)
+static int read_remaining_length(int sock, unsigned int *value)
 {
-    unsigned char header;
-    unsigned char encoded;
-    unsigned int remaining = 0;
     unsigned int multiplier = 1;
+    unsigned int result = 0;
+    unsigned char digit;
     int count = 0;
 
+    do {
+        if (recv_exact(sock, &digit, 1) < 0)
+            return -1;
+
+        result += (unsigned int)(digit & 127) * multiplier;
+        count++;
+
+        if (count > 4)
+            return -1;
+
+        if (!(digit & 128))
+            break;
+
+        multiplier *= 128;
+    } while (1);
+
+    *value = result;
+    return 0;
+}
+
+static void safe_text(
+    const unsigned char *src,
+    unsigned int len,
+    char *dst,
+    unsigned int dst_size
+)
+{
+    unsigned int i;
+    unsigned int out = 0;
+
+    if (dst_size == 0)
+        return;
+
+    for (i = 0; i < len && out + 1 < dst_size; i++) {
+        unsigned char c = src[i];
+
+        if (c >= 32 && c <= 126)
+            dst[out++] = (char)c;
+        else if (c == '\n' || c == '\r' || c == '\t')
+            dst[out++] = ' ';
+        else
+            dst[out++] = '?';
+    }
+
+    dst[out] = '\0';
+}
+
+static void handle_publish(int client, unsigned char header,
+                           unsigned int len)
+{
+    unsigned int topic_len;
+    unsigned int offset;
+    unsigned int payload_len;
+    unsigned int qos;
+    char topic[MAX_TEXT];
+    char message[MAX_TEXT];
+    char line[MAX_TEXT + 32];
+
+    if (len < 2) {
+        log_msg("[MQTT] Invalid PUBLISH packet");
+        return;
+    }
+
+    topic_len = ((unsigned int)packet[0] << 8) | packet[1];
+
+    if (topic_len == 0 || topic_len > len - 2) {
+        log_msg("[MQTT] Invalid topic");
+        return;
+    }
+
+    offset = 2 + topic_len;
+    qos = (header >> 1) & 3;
+
+    if (qos == 3) {
+        log_msg("[MQTT] Invalid PUBLISH QoS");
+        return;
+    }
+
+    if (qos == 1 || qos == 2) {
+        if (offset + 2 > len) {
+            log_msg("[MQTT] Missing packet identifier");
+            return;
+        }
+    }
+
+    safe_text(packet + 2, topic_len, topic, sizeof(topic));
+
+    if (qos > 0) {
+        unsigned int packet_id = offset;
+
+        offset += 2;
+
+        if (qos == 1) {
+            unsigned char ack[] = {
+                0x40, 0x02,
+                packet[packet_id],
+                packet[packet_id + 1]
+            };
+
+            if (send_exact(client, ack, sizeof(ack)) < 0)
+                log_msg("[MQTT] PUBACK send failed");
+        } else {
+            log_msg("[MQTT] QoS 2 is not supported yet");
+            return;
+        }
+    }
+
+    payload_len = len - offset;
+
+    safe_text(
+        packet + offset,
+        payload_len,
+        message,
+        sizeof(message)
+    );
+
+    log_msg("");
+    log_msg("=== MQTT MESSAGE ===");
+
+    snprintf(line, sizeof(line), "Topic: %s", topic);
+    log_msg(line);
+
+    snprintf(line, sizeof(line), "Message: %s", message);
+    log_msg(line);
+
+    log_msg("====================");
+}
+
+static void handle_client(int client)
+{
     log_msg("[TCP] Client connected");
 
     while (1) {
+        unsigned char header;
+        unsigned int remaining;
+
         if (recv_exact(client, &header, 1) < 0) {
             log_msg("[TCP] Client disconnected");
             break;
         }
 
-        if (recv_exact(client, &encoded, 1) < 0) {
+        if (read_remaining_length(client, &remaining) < 0) {
             log_msg("[MQTT] Invalid packet length");
             break;
         }
-
-        remaining = 0;
-        multiplier = 1;
-        count = 0;
-
-        do {
-            remaining += (unsigned int)(encoded & 127) * multiplier;
-            count++;
-
-            if (encoded & 128) {
-                if (count >= 4 ||
-                    recv_exact(client, &encoded, 1) < 0) {
-                    log_msg("[MQTT] Invalid length encoding");
-                    return;
-                }
-
-                multiplier *= 128;
-            } else {
-                break;
-            }
-        } while (1);
 
         if (remaining > MAX_PACKET) {
             log_msg("[MQTT] Packet too large");
@@ -109,31 +223,55 @@ static void handle_client(int client)
         }
 
         {
-            char line[80];
+            char line[64];
+
             snprintf(line, sizeof(line),
                      "[MQTT] Packet type: 0x%X",
                      (header >> 4) & 0x0F);
             log_msg(line);
         }
 
-        if ((header >> 4) == 1) {
+        switch ((header >> 4) & 0x0F) {
+        case 1: {
             unsigned char connack[] = { 0x20, 0x02, 0x00, 0x00 };
 
             if (send_exact(client, connack, sizeof(connack)) < 0) {
                 log_msg("[MQTT] CONNACK send failed");
-                break;
+                goto done;
             }
 
             log_msg("[MQTT] CONNECT received");
             log_msg("[MQTT] CONNACK sent");
-        } else if ((header >> 4) == 14) {
-            log_msg("[MQTT] DISCONNECT received");
             break;
-        } else {
+        }
+
+        case 3:
+            handle_publish(client, header, remaining);
+            break;
+
+        case 12: {
+            unsigned char pingresp[] = { 0xD0, 0x00 };
+
+            if (send_exact(client, pingresp, sizeof(pingresp)) < 0) {
+                log_msg("[MQTT] PINGRESP send failed");
+                goto done;
+            }
+
+            log_msg("[MQTT] PINGREQ -> PINGRESP");
+            break;
+        }
+
+        case 14:
+            log_msg("[MQTT] DISCONNECT received");
+            goto done;
+
+        default:
             log_msg("[MQTT] Packet not implemented yet");
+            break;
         }
     }
 
+done:
     sceNetSocketClose(client);
 }
 
@@ -144,6 +282,7 @@ int main(void)
 
     psvDebugScreenInit();
     psvDebugScreenPrintf("\e[2J\e[H");
+
     log_msg("Vita MQTT Broker");
     log_msg("------------------------------");
     log_msg("Starting network...");
@@ -194,6 +333,7 @@ int main(void)
 
     {
         int opt = 1;
+
         sceNetSetsockopt(
             server,
             SCE_NET_SOL_SOCKET,
@@ -239,9 +379,7 @@ int main(void)
     }
 
     log_msg("[NET] Network initialized");
-    log_msg("[MQTT] TCP server is running");
-    log_msg("Port: 1883");
-    log_msg("------------------------------");
+    log_msg("[MQTT] Server running on port 1883");
     log_msg("Waiting for MQTT client...");
 
     while (1) {
