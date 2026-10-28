@@ -4,14 +4,14 @@
 #include <psp2/kernel/processmgr.h>
 #include <vita2d.h>
 
-#define W 960.0f
-#define H 544.0f
+#define SCREEN_W 960.0f
+#define SCREEN_H 544.0f
 
 typedef struct {
     float x, y, z;
 } Vec3;
 
-static Vec3 cube[8] = {
+static const Vec3 cube[8] = {
     {-1,-1,-1}, { 1,-1,-1},
     { 1, 1,-1}, {-1, 1,-1},
     {-1,-1, 1}, { 1,-1, 1},
@@ -19,21 +19,18 @@ static Vec3 cube[8] = {
 };
 
 static const int faces[6][4] = {
-    {0,1,2,3},
-    {5,4,7,6},
-    {4,0,3,7},
-    {1,5,6,2},
-    {3,2,6,7},
-    {4,5,1,0}
+    {0,1,2,3}, {5,4,7,6},
+    {4,0,3,7}, {1,5,6,2},
+    {3,2,6,7}, {4,5,1,0}
 };
 
 static const unsigned int colors[6] = {
-    RGBA8(255, 65, 65, 255),
-    RGBA8(255, 220, 45, 255),
-    RGBA8(55, 220, 100, 255),
-    RGBA8(50, 145, 255, 255),
-    RGBA8(255, 135, 35, 255),
-    RGBA8(245, 245, 250, 255)
+    RGBA8(255,65,65,255),
+    RGBA8(255,220,45,255),
+    RGBA8(55,220,100,255),
+    RGBA8(50,145,255,255),
+    RGBA8(255,135,35,255),
+    RGBA8(245,245,250,255)
 };
 
 static float angle_x = -0.45f;
@@ -67,10 +64,10 @@ static vita2d_color_vertex project_vertex(
     float scale = 155.0f / depth;
 
     vita2d_color_vertex out = {
-        .x = W * 0.5f + r.x * scale,
-        .y = H * 0.5f - r.y * scale,
-        .z = 0.5f,
-        .color = color
+        SCREEN_W * 0.5f + r.x * scale,
+        SCREEN_H * 0.5f - r.y * scale,
+        0.5f,
+        color
     };
 
     return out;
@@ -102,20 +99,17 @@ static void draw_face(int face)
 static void draw_cube(void)
 {
     float depths[6];
-    int order[6] = {0, 1, 2, 3, 4, 5};
+    int order[6] = {0,1,2,3,4,5};
 
     for (int f = 0; f < 6; f++) {
         depths[f] = 0.0f;
 
         for (int i = 0; i < 4; i++) {
-            Vec3 p = rotate_vertex(
-                cube[faces[f][i]]
-            );
+            Vec3 p = rotate_vertex(cube[faces[f][i]]);
             depths[f] += p.z;
         }
     }
 
-    /* Сначала рисуем дальние грани */
     for (int i = 0; i < 5; i++) {
         for (int j = i + 1; j < 6; j++) {
             if (depths[order[i]] > depths[order[j]]) {
@@ -130,8 +124,7 @@ static void draw_cube(void)
         draw_face(order[i]);
     }
 
-    /* Контуры куба */
-    unsigned int edge = RGBA8(20, 25, 35, 255);
+    unsigned int edge = RGBA8(20,25,35,255);
 
     for (int f = 0; f < 6; f++) {
         for (int i = 0; i < 4; i++) {
@@ -144,9 +137,7 @@ static void draw_cube(void)
                 project_vertex(cube[b], edge);
 
             vita2d_draw_line(
-                p.x, p.y,
-                q.x, q.y,
-                edge
+                p.x, p.y, q.x, q.y, edge
             );
         }
     }
@@ -157,9 +148,7 @@ int main(void)
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     vita2d_init();
-    vita2d_set_clear_color(
-        RGBA8(18, 22, 35, 255)
-    );
+    vita2d_set_clear_color(RGBA8(18,22,35,255));
 
     SceCtrlData pad;
 
@@ -175,11 +164,9 @@ int main(void)
             angle_y = 0.65f;
         }
 
-        /* Медленное автоматическое вращение */
         angle_y += 0.008f;
         angle_x += 0.003f;
 
-        /* Крестовина */
         if (pad.buttons & SCE_CTRL_LEFT)
             angle_y -= 0.045f;
 
@@ -192,7 +179,6 @@ int main(void)
         if (pad.buttons & SCE_CTRL_DOWN)
             angle_x += 0.045f;
 
-        /* Левый аналоговый стик */
         int ax = (int)pad.lx - 128;
         int ay = (int)pad.ly - 128;
 
