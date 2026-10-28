@@ -16,9 +16,13 @@ set(VITA_VERSION "01.00")
 
 add_executable(VitaMQTT
     src/main.c
+    src/debugScreen.c
 )
 
+target_include_directories(VitaMQTT PRIVATE src)
+
 target_link_libraries(VitaMQTT
+    SceDisplay_stub
     SceNet_stub
     SceNetCtl_stub
     SceAppMgr_stub
