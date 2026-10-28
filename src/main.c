@@ -1,6 +1,7 @@
+
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -11,7 +12,7 @@
 #include "debugScreen.h"
 
 #define MQTT_PORT 1883
-#define BACKLOG 4
+#define BACKLOG 8
 #define MAX_PACKET 2048
 #define MAX_CLIENTS 4
 #define MAX_SUBS 32
@@ -40,13 +41,6 @@ static void log_msg(const char *msg)
         sceKernelUnlockMutex(log_mutex, 1);
 }
 
-static void log_packet(const char *prefix, const char *value)
-{
-    char line[192];
-    snprintf(line, sizeof(line), "%s%s", prefix, value);
-    log_msg(line);
-}
-
 static int recv_exact(int sock, unsigned char *buf, int len)
 {
     int total = 0;
@@ -55,10 +49,8 @@ static int recv_exact(int sock, unsigned char *buf, int len)
         int n = sceNetRecv(
             sock, buf + total, (unsigned int)(len - total), 0
         );
-
         if (n <= 0)
             return -1;
-
         total += n;
     }
 
@@ -73,10 +65,8 @@ static int send_exact(int sock, const unsigned char *buf, int len)
         int n = sceNetSend(
             sock, buf + total, (unsigned int)(len - total), 0
         );
-
         if (n <= 0)
             return -1;
-
         total += n;
     }
 
@@ -136,7 +126,7 @@ static void safe_text(
 {
     unsigned int i, out = 0;
 
-    if (!dst_size)
+    if (dst_size == 0)
         return;
 
     for (i = 0; i < len && out + 1 < dst_size; i++) {
@@ -197,7 +187,12 @@ static int add_subscription(int sock, const char *topic)
     return free_slot >= 0 ? 0 : -1;
 }
 
-static void forward_publish(
+/*
+ * Формируем MQTT PUBLISH с QoS 0.
+ * Отправка выполняется под блокировкой таблицы подписок,
+ * чтобы сокет не был одновременно удалён из таблицы.
+ */
+static int forward_publish(
     const char *topic,
     const unsigned char *payload,
     unsigned int payload_len)
@@ -206,24 +201,27 @@ static void forward_publish(
     unsigned int topic_len = (unsigned int)strlen(topic);
     unsigned int remaining = 2 + topic_len + payload_len;
     int pos = 0;
-    int i, matched = 0;
+    int i;
+    int matched = 0;
+    int failed = 0;
     char line[192];
 
-    if (remaining > MAX_PACKET)
-        return;
+    if (remaining > MAX_PACKET) {
+        log_msg("[MQTT] Forward packet too large");
+        return -1;
+    }
 
-    out[pos++] = 0x30; /* PUBLISH, QoS 0 */
+    out[pos++] = 0x30;
     pos += encode_remaining_length(remaining, out + pos);
-
     out[pos++] = (unsigned char)(topic_len >> 8);
     out[pos++] = (unsigned char)(topic_len & 255);
 
     memcpy(out + pos, topic, topic_len);
-    pos += topic_len;
+    pos += (int)topic_len;
 
     if (payload_len > 0) {
         memcpy(out + pos, payload, payload_len);
-        pos += payload_len;
+        pos += (int)payload_len;
     }
 
     sceKernelLockMutex(sub_mutex, 1, NULL);
@@ -231,13 +229,12 @@ static void forward_publish(
     for (i = 0; i < MAX_SUBS; i++) {
         if (subscriptions[i].socket >= 0 &&
             strcmp(subscriptions[i].topic, topic) == 0) {
-
             int dest = subscriptions[i].socket;
 
             if (send_exact(dest, out, pos) >= 0) {
                 matched++;
             } else {
-                /* The client thread will clean up its subscriptions. */
+                failed++;
             }
         }
     }
@@ -245,26 +242,31 @@ static void forward_publish(
     sceKernelUnlockMutex(sub_mutex, 1);
 
     snprintf(line, sizeof(line),
-             "[MQTT] Forwarded to %d subscriber(s)", matched);
+             "[PUB] Delivered: %d, failed: %d",
+             matched, failed);
     log_msg(line);
+
+    return failed ? -1 : matched;
 }
 
 static void handle_publish(
-    int client, unsigned char header,
-    unsigned char *packet, unsigned int len)
+    int client,
+    unsigned char header,
+    unsigned char *packet,
+    unsigned int len)
 {
     unsigned int topic_len;
     unsigned int offset;
     unsigned int payload_len;
+    unsigned int qos = (header >> 1) & 3;
     char topic[MAX_TOPIC + 1];
     char message[MAX_PAYLOAD + 1];
     char line[192];
-    unsigned int qos = (header >> 1) & 3;
 
     (void)client;
 
     if (qos != 0) {
-        log_msg("[MQTT] Only incoming QoS 0 is supported");
+        log_msg("[MQTT] Incoming PUBLISH must use QoS 0");
         return;
     }
 
@@ -315,13 +317,15 @@ static void handle_publish(
 }
 
 static void handle_subscribe(
-    int client, unsigned char *packet, unsigned int len)
+    int client,
+    unsigned char *packet,
+    unsigned int len)
 {
     unsigned char response[MAX_PACKET];
     unsigned int pos = 2;
     unsigned int count = 0;
     unsigned int response_pos = 0;
-    unsigned char packet_id_hi, packet_id_lo;
+    unsigned char id_hi, id_lo;
     char line[192];
 
     if (len < 5) {
@@ -329,20 +333,17 @@ static void handle_subscribe(
         return;
     }
 
-    packet_id_hi = packet[0];
-    packet_id_lo = packet[1];
+    id_hi = packet[0];
+    id_lo = packet[1];
 
-    /* Reserve fixed header and remaining-length byte. */
     response[0] = 0x90;
     response_pos = 2;
-
-    response[response_pos++] = packet_id_hi;
-    response[response_pos++] = packet_id_lo;
+    response[response_pos++] = id_hi;
+    response[response_pos++] = id_lo;
 
     while (pos + 3 <= len && count < MAX_SUBS) {
         unsigned int topic_len =
             ((unsigned int)packet[pos] << 8) | packet[pos + 1];
-
         char topic[MAX_TOPIC + 1];
         unsigned char requested_qos;
         unsigned char result = 0x80;
@@ -366,7 +367,6 @@ static void handle_subscribe(
 
         requested_qos = packet[pos++];
 
-        /* Exact topics only: wildcard filters are not supported. */
         if (requested_qos <= 2 &&
             strchr(topic, '+') == NULL &&
             strchr(topic, '#') == NULL &&
@@ -379,34 +379,32 @@ static void handle_subscribe(
 
         if (result == 0) {
             snprintf(line, sizeof(line),
-                     "[MQTT] Subscribed: %s", topic);
+                     "[SUB] %s", topic);
             log_msg(line);
         } else {
             snprintf(line, sizeof(line),
-                     "[MQTT] Subscription rejected: %s", topic);
+                     "[SUB] Rejected: %s", topic);
             log_msg(line);
         }
     }
 
     if (count == 0) {
-        log_msg("[MQTT] No valid subscription filters");
+        log_msg("[MQTT] No valid subscriptions");
         return;
     }
 
     {
         unsigned char encoded[4];
+        unsigned char final_response[MAX_PACKET];
         unsigned int remaining = response_pos - 2;
         int encoded_len = encode_remaining_length(remaining, encoded);
-        unsigned char final_response[MAX_PACKET];
         int total = 0;
 
         final_response[total++] = response[0];
-
         memcpy(final_response + total, encoded, encoded_len);
         total += encoded_len;
-
         memcpy(final_response + total, response + 2, remaining);
-        total += remaining;
+        total += (int)remaining;
 
         if (send_exact(client, final_response, total) < 0)
             log_msg("[MQTT] SUBACK send failed");
@@ -494,11 +492,15 @@ done:
 static int client_thread(SceSize args, void *argp)
 {
     int client;
+    int *client_arg = (int *)argp;
 
     (void)args;
-    client = *(int *)argp;
+
+    client = *client_arg;
+    free(client_arg);
 
     handle_client(client);
+
     sceKernelExitDeleteThread(0);
     return 0;
 }
@@ -507,6 +509,7 @@ int main(void)
 {
     int ret;
     int server;
+    int i;
 
     psvDebugScreenInit();
     psvDebugScreenPrintf("\e[2J\e[H");
@@ -514,12 +517,9 @@ int main(void)
     log_mutex = sceKernelCreateMutex("mqtt_log", 0, 1, NULL);
     sub_mutex = sceKernelCreateMutex("mqtt_subs", 0, 1, NULL);
 
-    memset(subscriptions, 0, sizeof(subscriptions));
-
-    {
-        int i;
-        for (i = 0; i < MAX_SUBS; i++)
-            subscriptions[i].socket = -1;
+    for (i = 0; i < MAX_SUBS; i++) {
+        subscriptions[i].socket = -1;
+        subscriptions[i].topic[0] = '\0';
     }
 
     log_msg("Vita MQTT Broker");
@@ -555,10 +555,7 @@ int main(void)
     }
 
     server = sceNetSocket(
-        "mqtt-server",
-        SCE_NET_AF_INET,
-        SCE_NET_SOCK_STREAM,
-        0
+        "mqtt-server", SCE_NET_AF_INET, SCE_NET_SOCK_STREAM, 0
     );
 
     if (server < 0) {
@@ -572,11 +569,8 @@ int main(void)
     {
         int opt = 1;
         sceNetSetsockopt(
-            server,
-            SCE_NET_SOL_SOCKET,
-            SCE_NET_SO_REUSEADDR,
-            &opt,
-            sizeof(opt)
+            server, SCE_NET_SOL_SOCKET,
+            SCE_NET_SO_REUSEADDR, &opt, sizeof(opt)
         );
     }
 
@@ -590,9 +584,7 @@ int main(void)
         addr.sin_addr.s_addr = SCE_NET_INADDR_ANY;
 
         ret = sceNetBind(
-            server,
-            (SceNetSockaddr *)&addr,
-            sizeof(addr)
+            server, (SceNetSockaddr *)&addr, sizeof(addr)
         );
     }
 
@@ -617,7 +609,7 @@ int main(void)
 
     log_msg("[NET] Network initialized");
     log_msg("[MQTT] Server running on port 1883");
-    log_msg("Supports exact-topic subscriptions");
+    log_msg("Exact-topic subscriptions, QoS 0");
     log_msg("Waiting for MQTT clients...");
 
     while (1) {
@@ -625,32 +617,35 @@ int main(void)
         unsigned int client_len = sizeof(client_addr);
 
         int client = sceNetAccept(
-            server,
-            (SceNetSockaddr *)&client_addr,
-            &client_len
+            server, (SceNetSockaddr *)&client_addr, &client_len
         );
 
         if (client >= 0) {
+            int *client_arg = malloc(sizeof(int));
+
+            if (client_arg == NULL) {
+                log_msg("[ERROR] Client argument allocation failed");
+                sceNetSocketClose(client);
+                continue;
+            }
+
+            *client_arg = client;
+
             SceUID tid = sceKernelCreateThread(
-                "mqtt-client",
-                client_thread,
-                0x10000100,
-                64 * 1024,
-                0,
-                0,
-                NULL
+                "mqtt-client", client_thread,
+                0x10000100, 64 * 1024, 0, 0, NULL
             );
 
             if (tid < 0) {
                 log_msg("[ERROR] Cannot create client thread");
+                free(client_arg);
                 sceNetSocketClose(client);
-            } else {
-                if (sceKernelStartThread(
-                        tid, sizeof(client), &client) < 0) {
-                    log_msg("[ERROR] Cannot start client thread");
-                    sceNetSocketClose(client);
-                    sceKernelDeleteThread(tid);
-                }
+            } else if (sceKernelStartThread(
+                           tid, sizeof(client_arg), client_arg) < 0) {
+                log_msg("[ERROR] Cannot start client thread");
+                free(client_arg);
+                sceNetSocketClose(client);
+                sceKernelDeleteThread(tid);
             }
         } else {
             sceKernelDelayThread(100000);
