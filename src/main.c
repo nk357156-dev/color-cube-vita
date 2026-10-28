@@ -12,22 +12,16 @@
 int main(void)
 {
     int ret;
-    int server = -1;
+    int server;
 
     static unsigned char net_pool[256 * 1024];
     SceNetInitParam net_init;
 
-    /* Load system network modules */
+    /* Load network module */
     ret = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
     if (ret < 0) {
         sceKernelExitProcess(10);
         return 10;
-    }
-
-    ret = sceSysmoduleLoadModule(SCE_SYSMODULE_NET_CTL);
-    if (ret < 0) {
-        sceKernelExitProcess(11);
-        return 11;
     }
 
     /* Initialize network stack */
@@ -42,6 +36,7 @@ int main(void)
         return 12;
     }
 
+    /* Initialize network control */
     ret = sceNetCtlInit();
     if (ret < 0) {
         sceNetTerm();
@@ -49,7 +44,7 @@ int main(void)
         return 13;
     }
 
-    /* Create TCP server socket */
+    /* Create TCP socket */
     server = sceNetSocket(
         "mqtt-server",
         SCE_NET_AF_INET,
@@ -76,7 +71,7 @@ int main(void)
         );
     }
 
-    /* Bind to all network interfaces on port 1883 */
+    /* Bind port 1883 on all interfaces */
     {
         SceNetSockaddrIn addr;
         memset(&addr, 0, sizeof(addr));
@@ -101,7 +96,7 @@ int main(void)
         return 15;
     }
 
-    /* Start listening */
+    /* Listen for TCP connections */
     ret = sceNetListen(server, BACKLOG);
     if (ret < 0) {
         sceNetSocketClose(server);
@@ -111,7 +106,7 @@ int main(void)
         return 16;
     }
 
-    /* Accept TCP connections */
+    /* Accept and close incoming connections */
     while (1) {
         SceNetSockaddrIn client_addr;
         unsigned int client_len = sizeof(client_addr);
@@ -123,18 +118,11 @@ int main(void)
         );
 
         if (client >= 0) {
-            /* TCP test only: close the client connection */
             sceNetSocketClose(client);
         } else {
             sceKernelDelayThread(100000);
         }
     }
 
-    /* Unreachable during normal operation */
-    sceNetSocketClose(server);
-    sceNetCtlTerm();
-    sceNetTerm();
-
-    sceKernelExitProcess(0);
     return 0;
 }
