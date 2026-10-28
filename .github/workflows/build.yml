@@ -9,7 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     container:
       image: vitasdk/vitasdk:2026.08
 
@@ -17,17 +16,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check VitaSDK and shader compiler
+      - name: Locate GXM shader compiler
         run: |
           echo "VITASDK=$VITASDK"
-          echo "PSP2CGC=$PSP2CGC"
+          echo "PATH=$PATH"
+
+          echo "=== Search in PATH ==="
           command -v psp2cgc || true
-          if [ -n "$PSP2CGC" ]; then
-            test -x "$PSP2CGC" && echo "PSP2CGC executable"
-          fi
+
+          echo "=== Search in VitaSDK ==="
+          find "$VITASDK" -type f \
+            \( -name 'psp2cgc' -o -name 'cgc' \) \
+            -print 2>/dev/null || true
+
+          echo "=== Check environment ==="
+          env | grep -Ei 'PSP2CGC|CGC|VITASDK' || true
 
       - name: Build VPK
         run: |
+          if ! command -v psp2cgc >/dev/null 2>&1 && [ -z "$PSP2CGC" ]; then
+            echo "ERROR: psp2cgc is not available."
+            echo "GXM shader compilation cannot proceed yet."
+            exit 1
+          fi
+
           cmake -S . -B build
           cmake --build build --parallel 2
 
