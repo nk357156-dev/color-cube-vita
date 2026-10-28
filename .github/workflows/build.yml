@@ -1,1 +1,39 @@
-m
+name: Build Color Cube VPK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build VPK with VitaSDK
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            vitasdk/vitasdk:2026.08 \
+            sh -lc '
+              vdpm install libvita2d &&
+              cmake -S . -B build \
+                -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" &&
+              cmake --build build --parallel 2 &&
+              find build -type f -name "*.vpk" -print
+            '
+
+      - name: Upload VPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Color-Cube-VPK
+          path: build/*.vpk
+          if-no-files-found: error
+          retention-days: 14
