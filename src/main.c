@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <string.h>
 
 #include <psp2/kernel/processmgr.h>
@@ -11,8 +10,8 @@
 
 int main(void)
 {
-    SceNetInitParam net_init;
     static unsigned char net_pool[256 * 1024];
+    SceNetInitParam net_init;
 
     memset(&net_init, 0, sizeof(net_init));
     net_init.memory = net_pool;
@@ -26,7 +25,7 @@ int main(void)
     }
 
     ret = sceNetCtlInit();
-    if (ret < 0 && ret != SCE_NET_CTL_ERROR_NOT_INITIALIZED) {
+    if (ret < 0) {
         sceNetTerm();
         sceKernelExitProcess(2);
         return 2;
@@ -57,6 +56,7 @@ int main(void)
 
     SceNetSockaddrIn addr;
     memset(&addr, 0, sizeof(addr));
+
     addr.sin_len = sizeof(addr);
     addr.sin_family = SCE_NET_AF_INET;
     addr.sin_port = sceNetHtons(MQTT_PORT);
@@ -69,7 +69,7 @@ int main(void)
     );
 
     if (ret < 0) {
-        sceNetClose(server);
+        sceNetSocketClose(server);
         sceNetCtlTerm();
         sceNetTerm();
         sceKernelExitProcess(4);
@@ -78,14 +78,13 @@ int main(void)
 
     ret = sceNetListen(server, BACKLOG);
     if (ret < 0) {
-        sceNetClose(server);
+        sceNetSocketClose(server);
         sceNetCtlTerm();
         sceNetTerm();
         sceKernelExitProcess(5);
         return 5;
     }
 
-    /* Сервер работает до закрытия приложения. */
     while (1) {
         SceNetSockaddrIn client_addr;
         unsigned int client_len = sizeof(client_addr);
@@ -97,16 +96,20 @@ int main(void)
         );
 
         if (client >= 0) {
-            /* Пока только принимаем подключение. */
-            sceNetClose(client);
+            /*
+             * Пока только проверяем приём TCP-подключения.
+             * Обработка MQTT будет добавлена следующим шагом.
+             */
+            sceNetSocketClose(client);
         } else {
             sceKernelDelayThread(100000);
         }
     }
 
-    sceNetClose(server);
+    sceNetSocketClose(server);
     sceNetCtlTerm();
     sceNetTerm();
+
     sceKernelExitProcess(0);
     return 0;
 }
