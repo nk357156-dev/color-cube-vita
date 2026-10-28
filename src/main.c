@@ -5,7 +5,6 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
-#include <psp2/net/neterrno.h>
 
 #define MQTT_PORT 1883
 #define BACKLOG 4
