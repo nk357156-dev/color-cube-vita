@@ -27,6 +27,7 @@ target_link_libraries(VitaMQTT
     SceNetCtl_stub
     SceAppMgr_stub
     SceSysmodule_stub
+    SceKernelThreadMgr_stub
     m
 )
 
