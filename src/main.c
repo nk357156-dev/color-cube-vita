@@ -11,10 +11,7 @@ typedef struct {
     float x, y, z;
 } Vec3;
 
-typedef struct {
-    float x, y, z;
-    unsigned int color;
-} Vertex;
+typedef vita2d_color_vertex Vertex;
 
 static Vec3 cube[8] = {
     {-1,-1,-1}, {1,-1,-1}, {1,1,-1}, {-1,1,-1},
