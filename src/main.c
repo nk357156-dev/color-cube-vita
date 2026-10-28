@@ -9,8 +9,14 @@
 #define CUBE_H 200
 #define DEPTH 35
 #define EDGE 5
-
 #define STICK_DEADZONE 25
+
+static int clamp(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
 
 int main(void)
 {
@@ -24,8 +30,10 @@ int main(void)
     vita2d_set_clear_color(RGBA8(18, 22, 34, 255));
 
     SceCtrlData pad;
-    int x = 380;
-    int y = 172;
+
+    /* Угол условного поворота: от -100 до 100 */
+    int angle_x = 0;
+    int angle_y = 0;
 
     while (1) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
@@ -33,40 +41,50 @@ int main(void)
         if (pad.buttons & SCE_CTRL_START)
             break;
 
-        /* Левый аналоговый стик: диапазон примерно 0–255 */
-        int dx = (int)pad.lx - 128;
-        int dy = (int)pad.ly - 128;
+        int sx = (int)pad.lx - 128;
+        int sy = (int)pad.ly - 128;
 
-        if (dx < -STICK_DEADZONE)
-            x -= ( (-dx - STICK_DEADZONE) / 20 ) + 1;
-        else if (dx > STICK_DEADZONE)
-            x += ( ( dx - STICK_DEADZONE) / 20 ) + 1;
+        if (sx < -STICK_DEADZONE)
+            angle_y -= ((-sx - STICK_DEADZONE) / 20) + 1;
+        else if (sx > STICK_DEADZONE)
+            angle_y += ((sx - STICK_DEADZONE) / 20) + 1;
 
-        if (dy < -STICK_DEADZONE)
-            y -= ( (-dy - STICK_DEADZONE) / 20 ) + 1;
-        else if (dy > STICK_DEADZONE)
-            y += ( ( dy - STICK_DEADZONE) / 20 ) + 1;
+        if (sy < -STICK_DEADZONE)
+            angle_x -= ((-sy - STICK_DEADZONE) / 20) + 1;
+        else if (sy > STICK_DEADZONE)
+            angle_x += ((sy - STICK_DEADZONE) / 20) + 1;
 
-        if (x < 10) x = 10;
-        if (x > SCREEN_W - CUBE_W - DEPTH - 10)
-            x = SCREEN_W - CUBE_W - DEPTH - 10;
+        angle_x = clamp(angle_x, -100, 100);
+        angle_y = clamp(angle_y, -100, 100);
 
-        if (y < DEPTH + 10) y = DEPTH + 10;
-        if (y > SCREEN_H - CUBE_H - 10)
-            y = SCREEN_H - CUBE_H - 10;
+        /*
+         * Это визуальная имитация наклона:
+         * прямоугольники остаются плоскими,
+         * но верхняя и боковая грани меняют размер.
+         */
+        int depth_x = DEPTH + angle_y / 4;
+        int depth_y = DEPTH + angle_x / 4;
+
+        depth_x = clamp(depth_x, 12, 58);
+        depth_y = clamp(depth_y, 12, 58);
+
+        int x = (SCREEN_W - CUBE_W - depth_x) / 2;
+        int y = (SCREEN_H - CUBE_H + depth_y) / 2;
 
         vita2d_start_drawing();
         vita2d_clear_screen();
 
         /* Верхняя грань */
         vita2d_draw_rectangle(
-            x + DEPTH, y - DEPTH, CUBE_W, DEPTH,
+            x + depth_x, y - depth_y,
+            CUBE_W, depth_y,
             RGBA8(110, 205, 255, 255)
         );
 
         /* Правая грань */
         vita2d_draw_rectangle(
-            x + CUBE_W, y, DEPTH, CUBE_H,
+            x + CUBE_W, y,
+            depth_x, CUBE_H,
             RGBA8(28, 72, 155, 255)
         );
 
@@ -77,14 +95,22 @@ int main(void)
         );
 
         /* Рёбра передней грани */
-        vita2d_draw_rectangle(x, y, CUBE_W, EDGE,
-            RGBA8(190, 230, 255, 255));
-        vita2d_draw_rectangle(x, y + CUBE_H - EDGE,
-            CUBE_W, EDGE, RGBA8(15, 60, 120, 255));
-        vita2d_draw_rectangle(x, y, EDGE, CUBE_H,
-            RGBA8(190, 230, 255, 255));
-        vita2d_draw_rectangle(x + CUBE_W - EDGE, y,
-            EDGE, CUBE_H, RGBA8(15, 60, 120, 255));
+        vita2d_draw_rectangle(
+            x, y, CUBE_W, EDGE,
+            RGBA8(190, 230, 255, 255)
+        );
+        vita2d_draw_rectangle(
+            x, y + CUBE_H - EDGE, CUBE_W, EDGE,
+            RGBA8(15, 60, 120, 255)
+        );
+        vita2d_draw_rectangle(
+            x, y, EDGE, CUBE_H,
+            RGBA8(190, 230, 255, 255)
+        );
+        vita2d_draw_rectangle(
+            x + CUBE_W - EDGE, y, EDGE, CUBE_H,
+            RGBA8(15, 60, 120, 255)
+        );
 
         vita2d_end_drawing();
         vita2d_swap_buffers();
